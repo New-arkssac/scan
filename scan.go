@@ -19,64 +19,64 @@ import (
 )
 
 type workScan struct {
-	ip, port string
-	num, breakNum int
+	ip, port                                    string
+	num, breakNum                               int
 	webJob, portJob, finishJob, failJob, finish chan string
-	content *bufio.Scanner
-	file *os.File
-	quit chan bool
-	m map[string]interface{}
+	content                                     *bufio.Scanner
+	file                                        *os.File
+	quit                                        chan bool
+	//	m map[string]interface{}
 	successWeb, failWeb, notWeb map[string][]string
-	portMsg map[string]string
-	rw *sync.RWMutex
+	portMsg                     map[string]string
+	rw                          *sync.RWMutex
 }
 
 var (
-	fileName, folderFileName string
+	fileName, folderFileName      string
 	goroutines, jobNum, finishNum int
-	tr = &http.Transport{
+	tr                            = &http.Transport{
 		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
 	}
-	client = &http.Client{Transport: tr, Timeout: 5*time.Second}
-	chrome = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/98.0.4758.82 Safari/537.36"
+	client  = &http.Client{Transport: tr, Timeout: 5 * time.Second}
+	chrome  = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/98.0.4758.82 Safari/537.36"
 	firefox = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:85.0) Gecko/20100101 Firefox/85.0"
 )
 
 func init() {
-	flag.StringVar(&fileName, "e","", "excel文件路径")
-	flag.StringVar(&folderFileName, "f","1.txt", "字典文件路径")
+	flag.StringVar(&fileName, "e", "", "excel文件路径")
+	flag.StringVar(&folderFileName, "f", "1.txt", "字典文件路径")
 	flag.IntVar(&goroutines, "g", 10, "go程数量")
 	flag.IntVar(&jobNum, "J", 10, "工作缓存区")
 	flag.IntVar(&finishNum, "F", 10, "完成缓存区")
 }
 
-func (w *workScan)getHost()  {
+func (w *workScan) getHost() {
 	f, err := excelize.OpenFile(fileName)
-	if err != nil{
+	if err != nil {
 		log.Println(err)
 		return
 	}
 	rows, no := f.Rows("Sheet1")
-	if no != nil{
+	if no != nil {
 		log.Println(no)
 		return
 	}
 	for rows.Next() {
 		row, cloErr := rows.Columns()
-		if cloErr != nil{
+		if cloErr != nil {
 			return
 		}
-		if len(row) <= 2{
+		if len(row) <= 2 {
 			continue
 		}
 		w.num++
 		if w.num == 1 {
 			continue
 		}
-		if b, ipErr := regexp.MatchString(`\d+.\d+.\d+.\d+`, row[1]); b && ipErr == nil{
+		if b, ipErr := regexp.MatchString(`\d+.\d+.\d+.\d+`, row[1]); b && ipErr == nil {
 			w.ip = row[1]
 		}
-		if strings.Contains(row[2], "/tcp"){
+		if strings.Contains(row[2], "/tcp") {
 			w.port = strings.Split(row[2], "/tcp")[0]
 		}
 		w.webJob <- fmt.Sprintf("%s:%s", w.ip, w.port)
@@ -88,7 +88,7 @@ func (w *workScan) getMsgPort(host string) {
 		buf [1024]byte
 	)
 	conn, err := net.DialTimeout("tcp", host, 1*time.Second)
-	if err != nil{
+	if err != nil {
 		w.rw.Lock()
 		w.portMsg[host] = "CLOSE"
 		w.rw.Unlock()
@@ -101,14 +101,14 @@ func (w *workScan) getMsgPort(host string) {
 	default:
 		_, _ = writer.Write([]byte("help"))
 	}
-	_ = conn.SetReadDeadline(time.Now().Add(1*time.Second))
-	if n, no := conn.Read(buf[:]); no != nil{
+	_ = conn.SetReadDeadline(time.Now().Add(1 * time.Second))
+	if n, no := conn.Read(buf[:]); no != nil {
 		w.rw.Lock()
 		msg := fmt.Sprintf("%s message: nil", host)
-		w.notWeb["port"] = append(w.notWeb["port"], )
+		w.notWeb["port"] = append(w.notWeb["port"])
 		w.rw.Unlock()
 		w.finish <- msg
-	}else {
+	} else {
 		w.rw.Lock()
 		msg := fmt.Sprintf("%s message: %s\r", host, strings.TrimSpace(string(buf[:n])))
 		w.notWeb["port"] = append(w.notWeb["port"], msg)
@@ -119,7 +119,7 @@ func (w *workScan) getMsgPort(host string) {
 	defer runtime.Goexit()
 }
 
-func (w *workScan)setRequest(ua, host, url, https string)  {
+func (w *workScan) setRequest(ua, host, url, https string) {
 	requestHttp, _ := http.NewRequest("GET", url, nil)
 	requestHttps, _ := http.NewRequest("GET", https, nil)
 	requestHttp.Header.Set("User-Agent", ua)
@@ -131,12 +131,12 @@ func (w *workScan) httpNetScan(url, https *http.Request, host, ua, requestHttp, 
 	var requestUrl = requestHttp
 	var response *http.Response
 	ok, reErr := regexp.MatchString(`(?i)\w/\S+$`, host)
-	if reErr != nil{
+	if reErr != nil {
 		fmt.Println(reErr)
 	}
 	response1, err := client.Do(url)
 	response = response1
-	if err != nil || response1.StatusCode != 200{
+	if err != nil || response1.StatusCode != 200 {
 		response2, no := client.Do(https)
 		requestUrl = requestHttps
 		response = response2
@@ -144,8 +144,8 @@ func (w *workScan) httpNetScan(url, https *http.Request, host, ua, requestHttp, 
 			w.portJob <- host
 			return
 		}
-		if response2.StatusCode != 200{
-			if ua == firefox{
+		if response2.StatusCode != 200 {
+			if ua == firefox {
 				if !ok {
 					go w.rangeFolder(host)
 				}
@@ -162,19 +162,19 @@ func (w *workScan) httpNetScan(url, https *http.Request, host, ua, requestHttp, 
 	defer runtime.Goexit()
 }
 
-func (w *workScan) responseBodyRead(response *http.Response, requestUrl string)  {
+func (w *workScan) responseBodyRead(response *http.Response, requestUrl string) {
 	var text string
 	body, err := ioutil.ReadAll(response.Body)
-	if err != nil{
+	if err != nil {
 		w.rw.Lock()
 		w.failWeb[requestUrl] = append(w.failWeb[requestUrl], "error")
 		w.rw.Unlock()
 		return
 	}
 	content := regexp.MustCompile(`<title>(.*?)</title>`).FindStringSubmatch(string(body))
-	if len(content) != 0{
+	if len(content) != 0 {
 		text = content[len(content)-1]
-	}else {
+	} else {
 		text = ""
 	}
 	switch {
@@ -183,54 +183,54 @@ func (w *workScan) responseBodyRead(response *http.Response, requestUrl string) 
 		w.rw.Lock()
 		w.successWeb["SUCCESS"] = append(w.successWeb["SUCCESS"], msg)
 		w.rw.Unlock()
-		w.finish <- fmt.Sprintf("%s\n",msg)
+		w.finish <- fmt.Sprintf("%s\n", msg)
 	default:
 		msg := fmt.Sprintf("%s %s %s", requestUrl, response.Status, text)
 		w.rw.Lock()
 		w.failWeb["FAIL"] = append(w.successWeb["FAIL"], msg)
 		w.rw.Unlock()
-		w.finish <- fmt.Sprintf("%s\r",msg)
+		w.finish <- fmt.Sprintf("%s\r", msg)
 	}
 }
 
 func (w *workScan) rangeFolder(host string) {
 	for {
-		if !w.content.Scan(){
+		if !w.content.Scan() {
 			break
 		}
-		w.webJob <- fmt.Sprintf("%s/%s",host,strings.TrimSpace(w.content.Text()))
+		w.webJob <- fmt.Sprintf("%s/%s", host, strings.TrimSpace(w.content.Text()))
 	}
 	runtime.Goexit()
 }
 
 func scanBody() *workScan {
 	w := &workScan{
-		webJob: make(chan string, jobNum),
-		portJob: make(chan string, jobNum),
+		webJob:    make(chan string, jobNum),
+		portJob:   make(chan string, jobNum),
 		finishJob: make(chan string, jobNum),
-		failJob: make(chan string, jobNum),
-		finish: make(chan string),
-		quit: make(chan bool),
-		m: make(map[string]interface{}),
+		failJob:   make(chan string, jobNum),
+		finish:    make(chan string),
+		quit:      make(chan bool),
+		//m: make(map[string]interface{}),
 		successWeb: make(map[string][]string),
-		failWeb: make(map[string][]string),
-		notWeb: make(map[string][]string),
-		portMsg: make(map[string]string),
-		rw: new(sync.RWMutex),
+		failWeb:    make(map[string][]string),
+		notWeb:     make(map[string][]string),
+		portMsg:    make(map[string]string),
+		rw:         new(sync.RWMutex),
 	}
 	return w
 }
 
-func (w *workScan) start()  {
+func (w *workScan) start() {
 	fmt.Println("start……")
 	file, err := os.Open(folderFileName)
 	w.file = file
-	if err != nil{
+	if err != nil {
 		fmt.Println(err)
 		return
 	}
 	w.content = bufio.NewScanner(file)
-	for i := 0; i < goroutines; i++{
+	for i := 0; i < goroutines; i++ {
 		go w.goroutine()
 	}
 	go w.getHost()
@@ -243,15 +243,15 @@ func (w *workScan) close() {
 	close(w.webJob)
 	close(w.finish)
 	close(w.quit)
-	if err := w.file.Close(); err != nil{
+	if err := w.file.Close(); err != nil {
 		return
 	}
 }
 
 func (w *workScan) goroutine() {
-	for{
+	for {
 		select {
-		case i := <- w.webJob :
+		case i := <-w.webJob:
 			url := fmt.Sprintf("http://%s", i)
 			https := fmt.Sprintf("https://%s", i)
 			go w.setRequest(chrome, i, url, https)
@@ -263,7 +263,7 @@ func (w *workScan) goroutine() {
 	}
 }
 
-func main()  {
+func main() {
 	flag.Parse()
 	w := scanBody()
 	w.start()
