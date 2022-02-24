@@ -21,11 +21,10 @@ import (
 type workScan struct {
 	ip, port string
 	num, breakNum int
-	webJob, portJob, finishJob, failJob chan string
-	finish chan bool
+	webJob, portJob, finishJob, failJob, finish chan string
 	content *bufio.Scanner
 	file *os.File
-	quit chan int
+	quit chan bool
 	m map[string]interface{}
 	successWeb, failWeb, notWeb map[string][]string
 	portMsg map[string]string
@@ -34,7 +33,7 @@ type workScan struct {
 
 var (
 	fileName, folderFileName string
-	goroutines, jobNum, finishNum, num int
+	goroutines, jobNum, finishNum int
 	tr = &http.Transport{
 		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
 	}
@@ -105,19 +104,19 @@ func (w *workScan) getMsgPort(host string) {
 	_ = conn.SetReadDeadline(time.Now().Add(1*time.Second))
 	if n, no := conn.Read(buf[:]); no != nil{
 		w.rw.Lock()
-		w.notWeb["port"] = append(w.notWeb["port"], fmt.Sprintf("%s message: nil", host))
+		msg := fmt.Sprintf("%s message: nil", host)
+		w.notWeb["port"] = append(w.notWeb["port"], )
 		w.rw.Unlock()
+		w.finish <- msg
 	}else {
 		w.rw.Lock()
-		w.notWeb["port"] = append(w.notWeb["port"], fmt.Sprintf("%s message: %s", host,
-			strings.TrimSpace(string(buf[:n]))))
+		msg := fmt.Sprintf("%s message: %s\r", host, strings.TrimSpace(string(buf[:n])))
+		w.notWeb["port"] = append(w.notWeb["port"], msg)
 		w.rw.Unlock()
+		w.finish <- msg
 	}
 	_ = conn.Close()
-	defer func() {
-		w.quit <- 1
-		runtime.Goexit()
-	}()
+	defer runtime.Goexit()
 }
 
 func (w *workScan)setRequest(ua, host, url, https string)  {
@@ -160,10 +159,7 @@ func (w *workScan) httpNetScan(url, https *http.Request, host, ua, requestHttp, 
 		go w.rangeFolder(host)
 	}
 	w.responseBodyRead(response, requestUrl)
-	defer func() {
-		w.quit <- 1
-		runtime.Goexit()
-	}()
+	defer runtime.Goexit()
 }
 
 func (w *workScan) responseBodyRead(response *http.Response, requestUrl string)  {
@@ -187,13 +183,13 @@ func (w *workScan) responseBodyRead(response *http.Response, requestUrl string) 
 		w.rw.Lock()
 		w.successWeb["SUCCESS"] = append(w.successWeb["SUCCESS"], msg)
 		w.rw.Unlock()
-		fmt.Printf("%s\n",msg)
+		w.finish <- fmt.Sprintf("%s\n",msg)
 	default:
 		msg := fmt.Sprintf("%s %s %s", requestUrl, response.Status, text)
 		w.rw.Lock()
 		w.failWeb["FAIL"] = append(w.successWeb["FAIL"], msg)
 		w.rw.Unlock()
-		fmt.Printf("%s\r",msg)
+		w.finish <- fmt.Sprintf("%s\r",msg)
 	}
 }
 
@@ -213,8 +209,8 @@ func scanBody() *workScan {
 		portJob: make(chan string, jobNum),
 		finishJob: make(chan string, jobNum),
 		failJob: make(chan string, jobNum),
-		finish: make(chan bool),
-		quit: make(chan int),
+		finish: make(chan string),
+		quit: make(chan bool),
 		m: make(map[string]interface{}),
 		successWeb: make(map[string][]string),
 		failWeb: make(map[string][]string),
@@ -238,7 +234,7 @@ func (w *workScan) start()  {
 		go w.goroutine()
 	}
 	go w.getHost()
-	<-w.finish
+	<-w.quit
 	w.close()
 }
 
@@ -261,6 +257,8 @@ func (w *workScan) goroutine() {
 			go w.setRequest(chrome, i, url, https)
 		case i := <-w.portJob:
 			go w.getMsgPort(i)
+		case i := <-w.finish:
+			fmt.Printf(i)
 		}
 	}
 }
