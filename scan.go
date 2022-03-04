@@ -29,6 +29,7 @@ type workScan struct {
 	portMsg                map[string]string
 	abnormal               map[string]string
 	rw                     *sync.RWMutex
+	client                 *http.Client
 }
 
 type m struct {
@@ -40,12 +41,11 @@ type m struct {
 
 var (
 	fileName, folderFileName string
-	goroutines               int
+	goroutines, timeout      int
 	help                     bool
 	tr                       = &http.Transport{
 		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
 	}
-	client  = &http.Client{Transport: tr, Timeout: 2 * time.Second}
 	chrome  = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/98.0.4758.82 Safari/537.36"
 	firefox = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:85.0) Gecko/20100101 Firefox/85.0"
 )
@@ -55,6 +55,7 @@ func init() {
 	flag.StringVar(&fileName, "e", "", "`excel`文件路径, 不支持XLS且不能为空")
 	flag.StringVar(&folderFileName, "f", "", "`字典文件`路径")
 	flag.IntVar(&goroutines, "g", 10, "`go程`数量")
+	flag.IntVar(&timeout, "t", 2, "`timeout`时长，单位秒，时间越长精度越高，时间越短速度越快。不推荐小于2大于10")
 	flag.Usage = usage
 }
 
@@ -149,10 +150,10 @@ func (w *workScan) httpNetScan(url, https *http.Request, host, ua, requestHttp, 
 	if reErr != nil {
 		fmt.Println(reErr)
 	}
-	response1, err := client.Do(url)
+	response1, err := w.client.Do(url)
 	response = response1
 	if err != nil || response.StatusCode != 200 {
-		response2, no := client.Do(https)
+		response2, no := w.client.Do(https)
 		requestUrl = requestHttps
 		response = response2
 		if no != nil {
@@ -301,7 +302,7 @@ func scanBody() *workScan {
 		notWeb:     make(map[string]string),
 		abnormal:   make(map[string]string),
 		rw:         new(sync.RWMutex),
-	}
+		client:     &http.Client{Transport: tr, Timeout: time.Duration(timeout) * time.Second}}
 	return w
 }
 
