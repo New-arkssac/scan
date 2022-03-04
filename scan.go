@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"regexp"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -39,7 +40,8 @@ type m struct {
 
 var (
 	fileName, folderFileName string
-	goroutines, jobNum       int
+	goroutines               int
+	help                     bool
 	tr                       = &http.Transport{
 		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
 	}
@@ -49,10 +51,11 @@ var (
 )
 
 func init() {
-	flag.StringVar(&fileName, "e", "", "excel文件路径")
-	flag.StringVar(&folderFileName, "f", "", "字典文件路径")
-	flag.IntVar(&goroutines, "g", 10, "go程数量")
-	flag.IntVar(&jobNum, "J", goroutines, "工作缓存区")
+	flag.BoolVar(&help, "h", false, "帮助文档")
+	flag.StringVar(&fileName, "e", "", "`excel`文件路径, 不支持XLS且不能为空")
+	flag.StringVar(&folderFileName, "f", "", "`字典文件`路径")
+	flag.IntVar(&goroutines, "g", 10, "`go程`数量")
+	flag.Usage = usage
 }
 
 func (w *workScan) getHost() {
@@ -118,33 +121,25 @@ func (w *workScan) getMsgPort(host string) string {
 func (w *workScan) setRequest(ua, host, url, https string) {
 	w.breakNum++
 	requestHttp, no := http.NewRequest("GET", url, nil)
-	defer func() {
-		w.quitNum++
-		if w.quitNum != w.breakNum {
-			return
-		} else {
-			time.Sleep(2 * time.Second)
-			w.quit <- true
-		}
-	}()
-	if no != nil {
-		fmt.Println("http err:", no)
-		w.rw.Lock()
-		w.abnormal[host] = "ABNORMAL"
-		w.rw.Unlock()
-		return
-	}
 	requestHttps, no1 := http.NewRequest("GET", https, nil)
-	if no1 != nil {
-		fmt.Println("https err:", no1)
+	if no != nil || no1 != nil {
+		fmt.Println("host err:", no)
 		w.rw.Lock()
 		w.abnormal[host] = "ABNORMAL"
 		w.rw.Unlock()
-		return
+		goto counter
 	}
 	requestHttp.Header.Set("User-Agent", ua)
 	requestHttps.Header.Set("User-Agent", ua)
 	w.httpNetScan(requestHttp, requestHttps, host, ua, url, https)
+counter:
+	w.quitNum++
+	runtime.Gosched()
+	if w.quitNum == w.breakNum {
+		time.Sleep(2 * time.Second)
+		w.quit <- true
+	}
+	return
 }
 
 func (w *workScan) httpNetScan(url, https *http.Request, host, ua, requestHttp, requestHttps string) {
@@ -165,6 +160,7 @@ func (w *workScan) httpNetScan(url, https *http.Request, host, ua, requestHttp, 
 				return
 			}
 			msg := w.getMsgPort(host)
+			msg = strings.TrimSpace(msg)
 			w.rw.Lock()
 			w.notWeb[host] = fmt.Sprintf("NOT WEB %s", msg)
 			w.rw.Unlock()
@@ -199,19 +195,18 @@ func (w *workScan) responseBodyRead(response *http.Response, ua, requestUrl stri
 		fmt.Printf("%s RESPONSE BODY ERR\r", requestUrl)
 		return
 	}
-	content := regexp.MustCompile(`<title>(.*?)</title>`).FindStringSubmatch(string(body))
+	content := regexp.MustCompile(`(?i)<title>(.*?)</title>`).FindStringSubmatch(string(body))
 	if len(content) != 0 {
 		text = content[len(content)-1]
 	} else {
-		text = ""
+		text = string(body)
 	}
-	switch {
-	case response.StatusCode == 200:
+	if response.StatusCode == 200 {
 		msg = fmt.Sprintf("%s %s %s", ua, response.Status, text)
 		w.rw.Lock()
 		w.successWeb[requestUrl] = append(w.successWeb[requestUrl], msg)
 		w.rw.Unlock()
-	default:
+	} else {
 		msg = fmt.Sprintf("%s %s %s", ua, response.Status, text)
 		w.rw.Lock()
 		w.failWeb[requestUrl] = append(w.failWeb[requestUrl], msg)
@@ -299,7 +294,7 @@ func (w *workScan) goroutine() {
 
 func scanBody() *workScan {
 	w := &workScan{
-		webJob:     make(chan string, jobNum),
+		webJob:     make(chan string, int(float64(goroutines)*0.8)),
 		quit:       make(chan bool),
 		successWeb: make(map[string][]string),
 		failWeb:    make(map[string][]string),
@@ -317,8 +312,24 @@ func checkFile(fileName string) bool {
 	return true
 }
 
+func usage() {
+	if _, err := fmt.Fprintf(os.Stderr, "帮助文档:\n"); err != nil {
+		return
+	}
+	flag.PrintDefaults()
+}
+
 func main() {
 	flag.Parse()
+	if help {
+		flag.Usage()
+		return
+	}
+	if !strings.Contains(fileName, "xlsx") {
+		fmt.Printf(`温馨提醒:
+	请使用 -h 参数查看帮助文档`)
+		return
+	}
 	t := time.Now()
 	w := scanBody()
 	w.start()
