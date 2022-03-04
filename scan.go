@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"crypto/tls"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"github.com/xuri/excelize/v2"
@@ -12,42 +13,46 @@ import (
 	"net/http"
 	"os"
 	"regexp"
-	"runtime"
 	"strings"
 	"sync"
 	"time"
 )
 
 type workScan struct {
-	ip, port                                    string
-	num, breakNum                               int
-	webJob, portJob, finishJob, failJob, finish chan string
-	content                                     *bufio.Scanner
-	file                                        *os.File
-	quit                                        chan bool
-	//	m map[string]interface{}
-	successWeb, failWeb, notWeb map[string][]string
-	portMsg                     map[string]string
-	rw                          *sync.RWMutex
+	ip, port               string
+	num, breakNum, quitNum int
+	webJob                 chan string
+	quit                   chan bool
+	successWeb, failWeb    map[string][]string
+	notWeb                 map[string]string
+	portMsg                map[string]string
+	abnormal               map[string]string
+	rw                     *sync.RWMutex
+}
+
+type m struct {
+	SUCCESS  map[string][]string `json:"SUCCESS"`
+	FAIL     map[string][]string `json:"FAIL"`
+	NOTWEB   map[string]string   `json:"NOTWEB"`
+	ABNORMAL map[string]string   `json:"ABNORMAL"`
 }
 
 var (
-	fileName, folderFileName      string
-	goroutines, jobNum, finishNum int
-	tr                            = &http.Transport{
+	fileName, folderFileName string
+	goroutines, jobNum       int
+	tr                       = &http.Transport{
 		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
 	}
-	client  = &http.Client{Transport: tr, Timeout: 5 * time.Second}
+	client  = &http.Client{Transport: tr, Timeout: 2 * time.Second}
 	chrome  = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/98.0.4758.82 Safari/537.36"
 	firefox = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:85.0) Gecko/20100101 Firefox/85.0"
 )
 
 func init() {
 	flag.StringVar(&fileName, "e", "", "excel文件路径")
-	flag.StringVar(&folderFileName, "f", "1.txt", "字典文件路径")
+	flag.StringVar(&folderFileName, "f", "", "字典文件路径")
 	flag.IntVar(&goroutines, "g", 10, "go程数量")
-	flag.IntVar(&jobNum, "J", 10, "工作缓存区")
-	flag.IntVar(&finishNum, "F", 10, "完成缓存区")
+	flag.IntVar(&jobNum, "J", goroutines, "工作缓存区")
 }
 
 func (w *workScan) getHost() {
@@ -81,47 +86,62 @@ func (w *workScan) getHost() {
 		}
 		w.webJob <- fmt.Sprintf("%s:%s", w.ip, w.port)
 	}
+	if closeErr := f.Close(); closeErr != nil {
+		fmt.Println(closeErr)
+	}
 }
 
-func (w *workScan) getMsgPort(host string) {
+func (w *workScan) getMsgPort(host string) string {
 	var (
 		buf [1024]byte
+		msg string
 	)
 	conn, err := net.DialTimeout("tcp", host, 1*time.Second)
 	if err != nil {
-		w.rw.Lock()
-		w.portMsg[host] = "CLOSE"
-		w.rw.Unlock()
-		return
+		return "CLOSE or FILTER"
 	}
 	writer := bufio.NewWriter(conn)
-	switch {
-	case strings.Contains(host, "2181"):
+	if strings.Contains(host, "2181") {
 		_, _ = writer.Write([]byte("envi"))
-	default:
-		_, _ = writer.Write([]byte("help"))
 	}
 	_ = conn.SetReadDeadline(time.Now().Add(1 * time.Second))
 	if n, no := conn.Read(buf[:]); no != nil {
-		w.rw.Lock()
-		msg := fmt.Sprintf("%s message: nil", host)
-		w.notWeb["port"] = append(w.notWeb["port"])
-		w.rw.Unlock()
-		w.finish <- msg
+		msg = "message: nil\r"
 	} else {
-		w.rw.Lock()
-		msg := fmt.Sprintf("%s message: %s\r", host, strings.TrimSpace(string(buf[:n])))
-		w.notWeb["port"] = append(w.notWeb["port"], msg)
-		w.rw.Unlock()
-		w.finish <- msg
+		msg = fmt.Sprintf("message: [%s]\n", strings.TrimSpace(string(buf[:n])))
 	}
 	_ = conn.Close()
-	defer runtime.Goexit()
+	fmt.Printf("%s %s", host, msg)
+	return msg
 }
 
 func (w *workScan) setRequest(ua, host, url, https string) {
-	requestHttp, _ := http.NewRequest("GET", url, nil)
-	requestHttps, _ := http.NewRequest("GET", https, nil)
+	w.breakNum++
+	requestHttp, no := http.NewRequest("GET", url, nil)
+	defer func() {
+		w.quitNum++
+		if w.quitNum != w.breakNum {
+			return
+		} else {
+			time.Sleep(2 * time.Second)
+			w.quit <- true
+		}
+	}()
+	if no != nil {
+		fmt.Println("http err:", no)
+		w.rw.Lock()
+		w.abnormal[host] = "ABNORMAL"
+		w.rw.Unlock()
+		return
+	}
+	requestHttps, no1 := http.NewRequest("GET", https, nil)
+	if no1 != nil {
+		fmt.Println("https err:", no1)
+		w.rw.Lock()
+		w.abnormal[host] = "ABNORMAL"
+		w.rw.Unlock()
+		return
+	}
 	requestHttp.Header.Set("User-Agent", ua)
 	requestHttps.Header.Set("User-Agent", ua)
 	w.httpNetScan(requestHttp, requestHttps, host, ua, url, https)
@@ -130,45 +150,53 @@ func (w *workScan) setRequest(ua, host, url, https string) {
 func (w *workScan) httpNetScan(url, https *http.Request, host, ua, requestHttp, requestHttps string) {
 	var requestUrl = requestHttp
 	var response *http.Response
-	ok, reErr := regexp.MatchString(`(?i)\w/\S+$`, host)
+	ok, reErr := regexp.MatchString(`\w/\S+$`, host)
 	if reErr != nil {
 		fmt.Println(reErr)
 	}
 	response1, err := client.Do(url)
 	response = response1
-	if err != nil || response1.StatusCode != 200 {
+	if err != nil || response.StatusCode != 200 {
 		response2, no := client.Do(https)
 		requestUrl = requestHttps
 		response = response2
-		if no != nil && !ok {
-			w.portJob <- host
+		if no != nil {
+			if ok {
+				return
+			}
+			msg := w.getMsgPort(host)
+			w.rw.Lock()
+			w.notWeb[host] = fmt.Sprintf("NOT WEB %s", msg)
+			w.rw.Unlock()
 			return
 		}
-		if response2.StatusCode != 200 {
+		if response.StatusCode != 200 {
 			if ua == firefox {
-				if !ok {
+				if folderFileName != "" && !ok {
 					go w.rangeFolder(host)
 				}
-				w.responseBodyRead(response, requestUrl)
+				w.responseBodyRead(response, "firefox", requestUrl)
 				return
 			}
 			w.setRequest(firefox, host, requestHttp, requestHttps)
 		}
 	}
-	if !ok {
+	if folderFileName != "" && !ok {
 		go w.rangeFolder(host)
 	}
-	w.responseBodyRead(response, requestUrl)
-	defer runtime.Goexit()
+	w.responseBodyRead(response, "chrome", requestUrl)
 }
 
-func (w *workScan) responseBodyRead(response *http.Response, requestUrl string) {
-	var text string
+func (w *workScan) responseBodyRead(response *http.Response, ua, requestUrl string) {
+	var (
+		text, msg string
+	)
 	body, err := ioutil.ReadAll(response.Body)
 	if err != nil {
 		w.rw.Lock()
 		w.failWeb[requestUrl] = append(w.failWeb[requestUrl], "error")
 		w.rw.Unlock()
+		fmt.Printf("%s RESPONSE BODY ERR\r", requestUrl)
 		return
 	}
 	content := regexp.MustCompile(`<title>(.*?)</title>`).FindStringSubmatch(string(body))
@@ -179,92 +207,121 @@ func (w *workScan) responseBodyRead(response *http.Response, requestUrl string) 
 	}
 	switch {
 	case response.StatusCode == 200:
-		msg := fmt.Sprintf("%s %s %s", requestUrl, response.Status, text)
+		msg = fmt.Sprintf("%s %s %s", ua, response.Status, text)
 		w.rw.Lock()
-		w.successWeb["SUCCESS"] = append(w.successWeb["SUCCESS"], msg)
+		w.successWeb[requestUrl] = append(w.successWeb[requestUrl], msg)
 		w.rw.Unlock()
-		w.finish <- fmt.Sprintf("%s\n", msg)
 	default:
-		msg := fmt.Sprintf("%s %s %s", requestUrl, response.Status, text)
+		msg = fmt.Sprintf("%s %s %s", ua, response.Status, text)
 		w.rw.Lock()
-		w.failWeb["FAIL"] = append(w.successWeb["FAIL"], msg)
+		w.failWeb[requestUrl] = append(w.failWeb[requestUrl], msg)
 		w.rw.Unlock()
-		w.finish <- fmt.Sprintf("%s\r", msg)
 	}
+	fmt.Println(requestUrl, msg)
+	if bodyCloseErr := response.Body.Close(); bodyCloseErr != nil {
+		fmt.Println(bodyCloseErr)
+	}
+	return
 }
 
 func (w *workScan) rangeFolder(host string) {
+	file, err := os.Open(folderFileName)
+	if err != nil {
+		fmt.Println(err)
+	}
+	content := bufio.NewScanner(file)
 	for {
-		if !w.content.Scan() {
+		if !content.Scan() {
 			break
 		}
-		w.webJob <- fmt.Sprintf("%s/%s", host, strings.TrimSpace(w.content.Text()))
+		w.webJob <- fmt.Sprintf("%s/%s", host, strings.TrimSpace(content.Text()))
 	}
-	runtime.Goexit()
-}
-
-func scanBody() *workScan {
-	w := &workScan{
-		webJob:    make(chan string, jobNum),
-		portJob:   make(chan string, jobNum),
-		finishJob: make(chan string, jobNum),
-		failJob:   make(chan string, jobNum),
-		finish:    make(chan string),
-		quit:      make(chan bool),
-		//m: make(map[string]interface{}),
-		successWeb: make(map[string][]string),
-		failWeb:    make(map[string][]string),
-		notWeb:     make(map[string][]string),
-		portMsg:    make(map[string]string),
-		rw:         new(sync.RWMutex),
+	if closeErr := file.Close(); closeErr != nil {
+		return
 	}
-	return w
 }
 
 func (w *workScan) start() {
-	fmt.Println("start……")
-	file, err := os.Open(folderFileName)
-	w.file = file
-	if err != nil {
-		fmt.Println(err)
-		return
-	}
-	w.content = bufio.NewScanner(file)
+	var (
+		mj  = m{}
+		f   *os.File
+		err error
+	)
+	fmt.Printf("开始扫描%s……\n", fileName)
+	name1 := regexp.MustCompile(`-\d+`).FindString(fileName)
+	name2 := "工单" + name1 + "-" + time.Now().Format("20060102") + ".json"
 	for i := 0; i < goroutines; i++ {
 		go w.goroutine()
 	}
 	go w.getHost()
 	<-w.quit
-	w.close()
+	fmt.Printf("%s\r", strings.Repeat(" ", 100))
+	fmt.Printf("一共测试了:%d个地址\n", w.quitNum)
+	mj.FAIL = w.failWeb
+	mj.NOTWEB = w.notWeb
+	mj.SUCCESS = w.successWeb
+	mj.ABNORMAL = w.abnormal
+	if !checkFile(name2) {
+		f, err = os.Create(name2)
+		if err != nil {
+			panic(err)
+		}
+	} else {
+		f, err = os.OpenFile(name2, os.O_WRONLY, 2)
+		if err != nil {
+			panic(err)
+		}
+	}
+	encode := json.NewEncoder(f)
+	fmt.Printf("开始写入%s……\n", name2)
+	encode.SetIndent("", "    ")
+	if err = encode.Encode(mj); err != nil {
+		panic(err)
+	}
+	if closeErr := f.Close(); closeErr != nil {
+		return
+	}
+	fmt.Printf("%s写入完成!\n", name2)
 }
 
 func (w *workScan) close() {
-	close(w.portJob)
 	close(w.webJob)
-	close(w.finish)
 	close(w.quit)
-	if err := w.file.Close(); err != nil {
-		return
-	}
 }
 
 func (w *workScan) goroutine() {
-	for {
-		select {
-		case i := <-w.webJob:
-			url := fmt.Sprintf("http://%s", i)
-			https := fmt.Sprintf("https://%s", i)
-			go w.setRequest(chrome, i, url, https)
-		case i := <-w.portJob:
-			go w.getMsgPort(i)
-		case i := <-w.finish:
-			fmt.Printf(i)
-		}
+	for i := range w.webJob {
+		url := fmt.Sprintf("http://%s", i)
+		https := fmt.Sprintf("https://%s", i)
+		w.setRequest(chrome, i, url, https)
 	}
+}
+
+func scanBody() *workScan {
+	w := &workScan{
+		webJob:     make(chan string, jobNum),
+		quit:       make(chan bool),
+		successWeb: make(map[string][]string),
+		failWeb:    make(map[string][]string),
+		notWeb:     make(map[string]string),
+		abnormal:   make(map[string]string),
+		rw:         new(sync.RWMutex),
+	}
+	return w
+}
+
+func checkFile(fileName string) bool {
+	if _, err := os.Stat(fileName); err != nil {
+		return false
+	}
+	return true
 }
 
 func main() {
 	flag.Parse()
+	t := time.Now()
 	w := scanBody()
 	w.start()
+	w.close()
+	fmt.Printf("共耗时: %v", time.Since(t))
 }
